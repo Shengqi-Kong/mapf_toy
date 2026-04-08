@@ -8,10 +8,17 @@ MAPF 可视化仿真 GUI —— 基于 tkinter。
   4. 点击「运行」按钮查看路径规划动画
 """
 
+import os
 import tkinter as tk
 from tkinter import messagebox
-from mapf_env import MAPFEnv
+
+import torch
+
+from mapf_env import MAPFEnv, MOVES
 from cbs import cbs_search
+from models.gnn_policy import GNNPolicy
+from data_gen import build_graph_observation
+from evaluate import resolve_collisions
 
 # ========== 配置 ==========
 DEFAULT_ROWS = 10
@@ -72,6 +79,11 @@ class Simulation:
 
         # 分隔
         tk.Frame(ctrl, width=2, bd=1, relief=tk.SUNKEN).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+
+        # 求解器选择
+        tk.Label(ctrl, text="求解器:").pack(side=tk.LEFT)
+        self.solver_var = tk.StringVar(value="CBS")
+        tk.OptionMenu(ctrl, self.solver_var, "CBS", "GNN").pack(side=tk.LEFT, padx=2)
 
         # 运行 / 停止 / 清除
         tk.Button(ctrl, text="▶ 运行", command=self._run, bg="#2ecc71", fg="white",
@@ -217,19 +229,74 @@ class Simulation:
             goals=list(self.goals),
         )
 
-        self.status_var.set("正在求解 CBS …")
-        self.master.update_idletasks()
+        solver = self.solver_var.get()
 
-        solution = cbs_search(env)
-        if solution is None:
-            messagebox.showerror("无解", "CBS 未找到可行路径，请检查地图设置。")
-            self.status_var.set("求解失败")
-            return
+        if solver == "CBS":
+            self.status_var.set("正在求解 CBS …")
+            self.master.update_idletasks()
+            solution = cbs_search(env)
+            if solution is None:
+                messagebox.showerror("无解", "CBS 未找到可行路径，请检查地图设置。")
+                self.status_var.set("求解失败")
+                return
+        else:
+            self.status_var.set("正在加载 GNN 模型 …")
+            self.master.update_idletasks()
+            solution = self._run_gnn(env)
+            if solution is None:
+                return
 
         self.paths = solution
         self.max_timestep = max(len(p) - 1 for p in solution)
         self.timestep = 0
         self._animate()
+
+    def _run_gnn(self, env: MAPFEnv):
+        """用 GNN 策略进行分散式推理，返回 paths 或 None。"""
+        model_path = os.path.join(os.path.dirname(__file__), "checkpoints", "latest.pt")
+        if not os.path.exists(model_path):
+            messagebox.showerror("模型缺失", f"找不到模型文件:\n{model_path}")
+            self.status_var.set("模型加载失败")
+            return None
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = GNNPolicy()
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+        model = model.to(device)
+        model.eval()
+
+        self.status_var.set("GNN 推理中 …")
+        self.master.update_idletasks()
+
+        max_steps = 50
+        positions = list(env.starts)
+        paths = [[s] for s in env.starts]
+
+        with torch.no_grad():
+            for _ in range(max_steps):
+                if all(positions[i] == env.goals[i] for i in range(env.num_agents)):
+                    break
+
+                data = build_graph_observation(env, positions, env.goals)
+                data = data.to(device)
+                logits = model(data)
+                actions = logits.argmax(dim=1).cpu().tolist()
+
+                intended = []
+                for i, a in enumerate(actions):
+                    dr, dc = MOVES[a]
+                    intended.append((positions[i][0] + dr, positions[i][1] + dc))
+
+                positions = resolve_collisions(env, positions, intended)
+                for i, p in enumerate(positions):
+                    paths[i].append(p)
+
+        success = all(positions[i] == env.goals[i] for i in range(env.num_agents))
+        if not success:
+            messagebox.showwarning("GNN 未到达", "GNN 策略未能在限定步数内让所有智能体到达目标。\n"
+                                   "仍将播放已有轨迹。")
+
+        return paths
 
     def _animate(self):
         if self.timestep > self.max_timestep:
