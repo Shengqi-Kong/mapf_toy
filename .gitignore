@@ -5,3 +5,5 @@ eval_logs
 expert_data.pt
 gnn_policy.pt
 checkpoints
+benchmark_results
+maps

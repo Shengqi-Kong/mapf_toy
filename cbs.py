@@ -5,6 +5,7 @@ CBS (Conflict-Based Search) — MAPF 的经典最优求解算法。
 """
 
 import heapq
+import time
 from typing import List, Tuple, Dict, Optional, Set
 from mapf_env import MAPFEnv
 
@@ -99,25 +100,29 @@ def _low_level_search(
     env: MAPFEnv,
     agent: int,
     constraints: List[Constraint],
+    deadline: float = None,
 ) -> Optional[List[Tuple[int, int]]]:
     """带约束的时空 A* 搜索，为单个智能体规划路径。"""
     start = env.starts[agent]
     goal = env.goals[agent]
     vertex_table, edge_table = _build_constraint_table(constraints, agent)
 
-    # 搜索上界：地图大小 * 智能体数（足够宽松）
-    max_timestep = env.width * env.height * env.num_agents
+    # 搜索上界：限制在合理范围内，避免大地图爆炸
+    max_timestep = min(env.width * env.height, 4096)
 
     def h(pos):
         return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
 
-    # (f, g, pos, timestep)
     open_list = [(h(start), 0, start, 0)]
     closed_set: Set[Tuple[Tuple[int, int], int]] = set()
-
     came_from: Dict[Tuple[Tuple[int, int], int], Tuple[Tuple[int, int], int]] = {}
+    iters = 0
 
     while open_list:
+        iters += 1
+        if iters % 2000 == 0 and deadline is not None and time.time() > deadline:
+            return None  # 低层超时
+
         f, g, pos, t = heapq.heappop(open_list)
 
         if (pos, t) in closed_set:
@@ -174,14 +179,15 @@ def _reconstruct(
 
 # ---------- CBS 高层搜索 ----------
 
-def cbs_search(env: MAPFEnv) -> Optional[List[List[Tuple[int, int]]]]:
-    """CBS 主函数。返回各智能体的路径列表，或 None（无解）。"""
+def cbs_search(env: MAPFEnv, timeout: float = None) -> Optional[List[List[Tuple[int, int]]]]:
+    """CBS 主函数。返回各智能体的路径列表，或 None（无解/超时）。"""
+    deadline = time.time() + timeout if timeout is not None else None
     root = CTNode()
     root.constraints = []
 
     # 为每个智能体做无约束 A*
     for i in range(env.num_agents):
-        path = _low_level_search(env, i, [])
+        path = _low_level_search(env, i, [], deadline)
         if path is None:
             return None
         root.solution.append(path)
@@ -190,6 +196,8 @@ def cbs_search(env: MAPFEnv) -> Optional[List[List[Tuple[int, int]]]]:
     open_list: List[CTNode] = [root]
 
     while open_list:
+        if deadline is not None and time.time() > deadline:
+            return None  # 超时
         node = heapq.heappop(open_list)
 
         conflict = _detect_first_conflict(node.solution)
@@ -220,9 +228,9 @@ def cbs_search(env: MAPFEnv) -> Optional[List[List[Tuple[int, int]]]]:
 
             # 只需重新规划受约束的智能体
             child.solution = [list(p) for p in node.solution]
-            new_path = _low_level_search(env, agent, child.constraints)
+            new_path = _low_level_search(env, agent, child.constraints, deadline)
             if new_path is None:
-                continue  # 该分支无解，剪枝
+                continue  # 该分支无解或超时，剪枝
             child.solution[agent] = new_path
             child.cost = sum(len(p) - 1 for p in child.solution)
             heapq.heappush(open_list, child)

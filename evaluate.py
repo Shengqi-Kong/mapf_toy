@@ -117,10 +117,9 @@ def evaluate(
 
     successes = 0
     total_valid = 0
-    makespans_gnn = []
-    makespans_cbs = []
-    flowtimes_gnn = []
-    flowtimes_cbs = []
+    soc_gnn = []
+    soc_cbs = []
+    partial_success_rates = []
 
     for idx in range(num_instances):
         env = generate_random_instance(width, height, num_agents, obstacle_density, rng)
@@ -137,19 +136,14 @@ def evaluate(
         # GNN rollout
         paths, success = rollout(env, model, device, max_steps)
 
+        # 部分成功率: 本回合中到达目标的 agent 比例
+        agents_at_goal = sum(1 for i in range(env.num_agents) if paths[i][-1] == env.goals[i])
+        partial_success_rates.append(agents_at_goal / env.num_agents)
+
         if success:
             successes += 1
-            # GNN 指标
-            gnn_makespan = max(len(p) - 1 for p in paths)
-            gnn_flowtime = sum(len(p) - 1 for p in paths)
-            makespans_gnn.append(gnn_makespan)
-            flowtimes_gnn.append(gnn_flowtime)
-
-            # CBS 指标
-            cbs_makespan = max(len(p) - 1 for p in cbs_solution)
-            cbs_flowtime = sum(len(p) - 1 for p in cbs_solution)
-            makespans_cbs.append(cbs_makespan)
-            flowtimes_cbs.append(cbs_flowtime)
+            soc_gnn.append(sum(len(p) - 1 for p in paths))
+            soc_cbs.append(sum(len(p) - 1 for p in cbs_solution))
 
         if (idx + 1) % 20 == 0:
             rate = successes / total_valid if total_valid > 0 else 0
@@ -168,6 +162,7 @@ def evaluate(
             "seed": seed,
         },
         "success_rate": successes / total_valid if total_valid > 0 else 0,
+        "partial_success_rate": round(sum(partial_success_rates) / len(partial_success_rates), 4) if partial_success_rates else 0,
         "successes": successes,
         "total_valid": total_valid,
     }
@@ -180,25 +175,19 @@ def evaluate(
         print("没有有效实例")
         return results
 
-    print(f"成功率: {successes}/{total_valid} = {successes / total_valid:.2%}")
+    print(f"总体成功率: {successes}/{total_valid} = {successes / total_valid:.2%}")
+    print(f"部分成功率: {sum(partial_success_rates) / len(partial_success_rates):.2%}")
 
     if successes > 0:
-        avg_makespan_gnn = sum(makespans_gnn) / len(makespans_gnn)
-        avg_makespan_cbs = sum(makespans_cbs) / len(makespans_cbs)
-        avg_flowtime_gnn = sum(flowtimes_gnn) / len(flowtimes_gnn)
-        avg_flowtime_cbs = sum(flowtimes_cbs) / len(flowtimes_cbs)
+        avg_soc_gnn = sum(soc_gnn) / len(soc_gnn)
+        avg_soc_cbs = sum(soc_cbs) / len(soc_cbs)
 
-        results["avg_makespan_gnn"] = round(avg_makespan_gnn, 2)
-        results["avg_makespan_cbs"] = round(avg_makespan_cbs, 2)
-        results["makespan_ratio"] = round(avg_makespan_gnn / avg_makespan_cbs, 2)
-        results["avg_flowtime_gnn"] = round(avg_flowtime_gnn, 2)
-        results["avg_flowtime_cbs"] = round(avg_flowtime_cbs, 2)
-        results["flowtime_ratio"] = round(avg_flowtime_gnn / avg_flowtime_cbs, 2)
+        results["avg_soc_gnn"] = round(avg_soc_gnn, 2)
+        results["avg_soc_cbs"] = round(avg_soc_cbs, 2)
+        results["soc_ratio"] = round(avg_soc_gnn / avg_soc_cbs, 2)
 
-        print(f"平均 Makespan:  GNN={avg_makespan_gnn:.2f}  CBS={avg_makespan_cbs:.2f}  "
-              f"比值={avg_makespan_gnn / avg_makespan_cbs:.2f}")
-        print(f"平均 Flowtime:  GNN={avg_flowtime_gnn:.2f}  CBS={avg_flowtime_cbs:.2f}  "
-              f"比值={avg_flowtime_gnn / avg_flowtime_cbs:.2f}")
+        print(f"平均 Sum of Costs:  GNN={avg_soc_gnn:.2f}  CBS={avg_soc_cbs:.2f}  "
+              f"比值={avg_soc_gnn / avg_soc_cbs:.2f}")
 
     return results
 
